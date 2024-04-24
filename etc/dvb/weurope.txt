@@ -1,0 +1,10 @@
+# DVB-T/DVB-T2/DTMB/ISDB-T Digital television frequencies
+# (Western Europe, Eastern Europe most countries Asia, Africa and Oceania)
+
+# f in Hz
+# UHF channels 21 to 69
+# 8000000*45
+f_start=474000000 
+f_end=858000000
+# 8MHz bandwidth
+f_step=8000000

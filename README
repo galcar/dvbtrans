@@ -1,0 +1,25 @@
+
+
+Available commands:
+
+push channel/service
+
+stop
+
+list
+
+receiver host port
+where host is the name or ip of a the computer that will receive the mpeg-ts. If the
+value of host is 'me' then, the recevier will be the ip of the connected terminal.
+
+search start
+search cancel
+search info
+	
+signal
+
+show
+
+exit
+
+shutdown

@@ -1,0 +1,47 @@
+#! /bin/sh
+### BEGIN INIT INFO
+# Provides:          dvbtrans
+# Required-Start:    $syslog $time
+# Required-Stop:     $syslog $time
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: DVB Recording and Network Transmitter Daemon
+# Description:       Debian init script for the dvb recording and transmitter daemon
+### END INIT INFO
+#
+# Author:	G Alcaraz <galcaraz@galcaraz.com>
+#
+
+PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin
+DAEMON=/usr/local/bin/dvbtrans
+PIDFILE=/var/run/dvbtrans.pid
+
+test -x $DAEMON || exit 0
+
+. /lib/lsb/init-functions
+
+case "$1" in
+  start)
+	log_daemon_msg "Starting DVB Transmitter" "dvbtrans"
+	start_daemon -p $PIDFILE $DAEMON -c /etc/dvb/dvbtrans.conf
+	log_end_msg $?
+    ;;
+  stop)
+	log_daemon_msg "Stopping DVB Transmitter" "dvbtrans"
+	killproc -p $PIDFILE $DAEMON
+	log_end_msg $?
+    ;;
+  force-reload|restart)
+    $0 stop
+    $0 start
+    ;;
+  status)
+    status_of_proc -p $PIDFILE $DAEMON dvbtrans && exit 0 || exit $?
+    ;;
+  *)
+    echo "Usage: /etc/init.d/dvbtrans {start|stop|restart|force-reload|status}"
+    exit 1
+    ;;
+esac
+
+exit 0
