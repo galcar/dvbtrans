@@ -1,4 +1,20 @@
 
+DVBTrans (DVB Transmitter) es un demonio servidor de streaming para contenidos de Televisión Digital
+
+Para ello, accede a los dispositivos DTV Linux, sintoniza los canales deseados y transmite los flujos 
+de audio y video encontrados usando cualquiera de los siguientes modos:
+-Bajo demanda, a través de HTTP, en un flujo continuo
+-Broadcast, a través de UDP a una dirección IP determinada
+
+DVBTrans también funciona como PVR
+
+DVBTrans puede funcionar como backend de PVR de Kodi, usando el cliente DVBViewer
+
+DVBTrans incluye un terminal de comandos tipo Telnet
+
+$ telnet <dvbtrans ip> <port>
+
+where port is configured in the dvbtrans configuration file
 
 Available commands:
 

@@ -1,4 +1,19 @@
-
+/*
+ * This file is part of the dvbtrans distribution (https://github.com/galcar/dvbtrans).
+ * Copyright (c) 2024 G. Alcaraz.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -270,11 +285,12 @@ int recorder_save (RECORDER *r) {
 		_format_time (prog->start, st);
 		_format_time (prog->end, et);
 
-		fprintf (f, "%ld;%s;%s;%c;dvbt://%d/%d;%s;%s\n",
+		fprintf (f, "%ld;%s;%s;%c;%s %d/%d;%s;%s\n",
 			prog->id,
 			st,
 			et,
 			prog->status,
+			mydvb_tuner_type_table()[prog->type],
 			prog->channel,
 			prog->service,
 			prog->title,
@@ -303,6 +319,7 @@ PROG * prog_new () {
 	prog->start 	= 0;
 	prog->end 		= 0;
 	prog->status 	= '\0';
+	prog->type		= DVB_TYPE_NONE;
 	prog->channel	= 0;
 	prog->service	= 0;
 	prog->title		= NULL;
@@ -314,9 +331,11 @@ PROG * prog_new () {
 }
 
 /**
- * a prog line: start;end;status;dvbt://channel/program;filename
+ * a prog line: start;end;status;dvb-t channel/program;filename
  */
 PROG *prog_parse (char *line) {
+
+	char type[16];
 
 	PROG *prog = NULL;
 
@@ -343,7 +362,8 @@ PROG *prog_parse (char *line) {
 				prog->status = token[0];
 				break;
 			case 5: /* dvb token */
-				sscanf (token, "dvbt://%d/%d", &prog->channel, &prog->service);
+				sscanf (token, "%s %d/%d", type, &prog->channel, &prog->service);
+				prog->type = mydvb_tuner_parse_type (type);
 				break;
 			case 6: /* title */
 				prog->title = strdup (token);
@@ -414,11 +434,12 @@ void recorder_log (RECORDER *r) {
 	for (i = 0; i < dyn_array_get_size (r->progs); i++) {
 
 		PROG *p = *((PROG **) dyn_array_get_data(r->progs, i));
-		printf ("Record %d %ld, %lld, %lld %c dvbt://%d/%d %s %s\n", i
+		printf ("Record %d %ld, %lld, %lld %c %s %d/%d %s %s\n", i
 				, p->id
 				, p->start
 				, p->end
 				, p->status
+				, mydvb_tuner_type_table()[p->type]
 				, p->channel
 				, p->service
 				, p->title

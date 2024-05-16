@@ -1,4 +1,19 @@
-
+/*
+ * This file is part of the dvbtrans distribution (https://github.com/galcar/dvbtrans).
+ * Copyright (c) 2024 G. Alcaraz.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
 #include <netdb.h>
 
 #include <stdio.h>
@@ -7,9 +22,7 @@
 
 #include "nettools.h"
 
-char *get_ip_by_addr (struct sockaddr_in *addr) {
-
-	static char s[16];
+char *get_ip_by_addr (struct sockaddr_in *addr, char *s) {
 
 	unsigned long remote_addr = addr->sin_addr.s_addr;
 
@@ -22,9 +35,7 @@ char *get_ip_by_addr (struct sockaddr_in *addr) {
 	return s;
 }
 
-char *get_ip_by_host (const char *hostname) {
-
-	char *ip;
+char *get_ip_by_host (const char *hostname, char *ip) {
 
 	struct hostent *he;
 	int j;
@@ -32,8 +43,6 @@ char *get_ip_by_host (const char *hostname) {
 	he = gethostbyname (hostname);
 
 	if (he!=NULL && he->h_addr_list[0] != NULL) {
-
-		ip = (char *) malloc (16); /* ipv4 address */
 
 		sprintf (ip, "");
 

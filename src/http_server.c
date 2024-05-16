@@ -1,4 +1,19 @@
-
+/*
+ * This file is part of the dvbtrans distribution (https://github.com/galcar/dvbtrans).
+ * Copyright (c) 2024 G. Alcaraz.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
 #include <sys/types.h>
 #include <sys/socket.h>
 
@@ -11,6 +26,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
+
+#include "nettools.h"
 
 #include "http_server.h"
 
@@ -129,6 +146,8 @@ HTTP_CLIENT *http_server_open_client (HTTP_SERVER *server) {
 
 	client->server = server;
 	client->socket = client_socket_fd;
+	get_ip_by_addr (&client_addr, client->ip);
+	client->dst_port = htons (client_addr.sin_port);
 	client->data   = NULL;
 
 	dyn_array_add (server->clients, &client);

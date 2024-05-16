@@ -1,3 +1,3 @@
 
 EXTRA_DIST = reconf
-SUBDIRS = m4 doc src
+SUBDIRS = m4 doc src tests
