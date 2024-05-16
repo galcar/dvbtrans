@@ -1,4 +1,19 @@
-
+/*
+ * This file is part of the dvbtrans distribution (https://github.com/galcar/dvbtrans).
+ * Copyright (c) 2024 G. Alcaraz.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
 #include <string.h>
 
 #include <sys/stat.h>
@@ -14,7 +29,6 @@
 #include "dynarray.h"
 #include "props.h"
 #include "utils.h"
-#include "charset.h"
 
 #define STR_CONCAT ("%s%s")
 #define STR_CONCAT_SP ("%s %s")
@@ -51,7 +65,7 @@ char *_dvbviewer_create_channel_list (INFO_DVB *dvb) {
 	char group_radio[8192];
 
 	int chn, prog;
-	int id;
+	long id;
 	int flags;
 	long epg_id = 0;
 	int num_channel = 0;
@@ -105,10 +119,7 @@ char *_dvbviewer_create_channel_list (INFO_DVB *dvb) {
 			flags = flags | (1 << 0);
 		}
 
-		chn 	= iprogram->channel->n;
-		prog 	= iprogram->n;
-
-		id = chn << 16 | prog;
+		id = iprogram->channel->type << 24 | iprogram->channel->n << 8 | iprogram->n;
 
 		//epg_id = (3 << 48) | (nid << 32) | (tid << 16) || sid;
 		epg_id = id;
@@ -117,7 +128,7 @@ char *_dvbviewer_create_channel_list (INFO_DVB *dvb) {
 		aux = utf8 == NULL ? NULL : strdup (utf8);
 		aux = replace (to_lower(aux), ' ','-');
 
-		sprintf (group, "%s<channel nr=\"%d\" name=\"%s\" ID=\"%d\" flags=\"%d\" EPGID=\"%ld\"><logo>icons/tv-logos-main/countries/spain/%s-es.png</logo></channel>"
+		sprintf (group, "%s<channel nr=\"%d\" name=\"%s\" ID=\"%ld\" flags=\"%d\" EPGID=\"%ld\"><logo>icons/tv-logos-main/countries/spain/%s-es.png</logo></channel>"
 				, group
 				, iprogram->user_number == -1 ? num_channel++ : iprogram->user_number
 				, utf8
@@ -332,23 +343,29 @@ void _dvbviewer_create_epg_eit (char *buf, MYDVB_EIT *eit, time_t start, time_t 
  * start: start timestamp (seconds since epoch, in UTC)
  * end: end timestamp (seconds since epoch, in UTC)
  */
-char *_dvbviewer_create_epg (MYDVB *mydvb, INFO_DVB *dvb, int service, time_t start, time_t end) {
+char *_dvbviewer_create_epg (MYDVB_ENGINE *engine, INFO_DVB *dvb, mydvb_tuner_type_t type, int channel, int service, time_t start, time_t end) {
 
-	MYDVB_PROGRAM *program;
+	MYDVB *mydvb = NULL;
+	MYDVB_PROGRAM *program = NULL;
 	int i;
 
 	char *buf = (char *) malloc (8192*32*sizeof(char));
 
-	program = mydvb_get_program_by_number (mydvb, service);
-
 	sprintf (buf, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
 	sprintf (buf, "%s<root>", buf);
 
-	if (program != NULL) {
-		//_dvbviewer_create_epg_eit (buf, program->eit, start, end);
+	mydvb = mydvb_get_channel (engine, type, channel);
 
-		for (i = 0; i < 16 ; i++) {
-			_dvbviewer_create_epg_eit (buf, program->eit_sched[i], start, end);
+	if (mydvb) {
+
+		program = mydvb_get_program_in_channel (mydvb, service);
+
+		if (program != NULL) {
+			//_dvbviewer_create_epg_eit (buf, program->eit, start, end);
+
+			for (i = 0; i < 16 ; i++) {
+				_dvbviewer_create_epg_eit (buf, program->eit_sched[i], start, end);
+			}
 		}
 	}
 
@@ -402,7 +419,7 @@ char *_dvbviewer_timerlist (APP_INFO *app_info) {
 				,p->title
 				);
 
-		int channel_id = p->channel << 16 | p->service;
+		int channel_id = p->type << 24 | p->channel << 8 | p->service;
 		sprintf (buf, "%s<Channel ID=\"%d\"></Channel>", buf
 				,channel_id
 				);
@@ -419,7 +436,7 @@ char *_dvbviewer_timerlist (APP_INFO *app_info) {
 	return buf;
 }
 
-void _dvbviewer_timeredit (APP_INFO *app_info, long id, time_t start, time_t end, int channel, int service, char *title, int enable) {
+void _dvbviewer_timeredit (APP_INFO *app_info, long id, time_t start, time_t end, mydvb_tuner_type_t type, int channel, int service, char *title, int enable) {
 
 	PROG *prog = NULL;
 
@@ -461,8 +478,9 @@ void _dvbviewer_timeredit (APP_INFO *app_info, long id, time_t start, time_t end
 	replace (filename, ' ','_');
 	replace (filename, ':','_');
 
-	sprintf (filename, "%s_%d_%d_%04d%02d%02d%02d%02d%02d_%ld.ts"
+	sprintf (filename, "%s_%s_%d_%d_%04d%02d%02d%02d%02d%02d_%ld.ts"
 			, filename
+			, mydvb_tuner_type_table()[type]
 			, channel
 			, service
 			, t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec
@@ -471,6 +489,7 @@ void _dvbviewer_timeredit (APP_INFO *app_info, long id, time_t start, time_t end
 	prog->start = start_ms;
 	prog->end   = end_ms;
 	prog->status = status;
+	prog->type = type;
 	prog->channel = channel;
 	prog->service = service;
 	if (prog->title) {
@@ -552,7 +571,7 @@ char *_dvbviewer_recordings (APP_INFO *app_info) {
 				,p->title
 				);
 
-		INFO_PROGRAM *iprogram = info_dvb_find (app_info->info_dvb, p->channel, p->service);
+		INFO_PROGRAM *iprogram = info_dvb_find (app_info->info_dvb, p->type, p->channel, p->service);
 
 		if (iprogram == NULL) {
 
@@ -641,8 +660,11 @@ char *_dvbviewer_status2 (APP_INFO *app_info) {
 
 	int cnt_tuner = 0;
 
-	if (app_info->mydvb->ready) { // busy
-		cnt_tuner ++;
+	for (i = 0; i < dyn_array_get_size (app_info->engine.tuners); i++) {
+		MYDVB_TUNE *tuner = *((MYDVB_TUNE **) dyn_array_get_data(app_info->engine.tuners, i));
+		if (tuner->status != TUNER_STATUS_NOOP || tuner->references > 0) { // busy
+			cnt_tuner ++;
+		}
 	}
 
 	sprintf (buf, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><status>");
@@ -713,10 +735,11 @@ void _dvbviewer_response_txt (HTTP_RESPONSE *response, unsigned char *txt) {
  */
 int dvbviewer_handler (HTTP_RESPONSE *response, APP_INFO *app_info) {
 	HTTP_REQUEST *request = response->request;
-	MYDVB *mydvb = app_info->mydvb;
+	MYDVB_ENGINE *engine = &app_info->engine;
 
 	int channel_id;
 
+	int channel_type;
 	int channel_num;
 	int service_num;
 
@@ -726,30 +749,25 @@ int dvbviewer_handler (HTTP_RESPONSE *response, APP_INFO *app_info) {
 
 	if (strncmp ("/upnp/channelstream/", request->uri, 20)==0) {
 
-		r = -1;
-
 		sscanf (request->uri, "/upnp/channelstream/%d.ts", &channel_id);
 
-		channel_num = channel_id >> 16;
-		service_num = channel_id & 0xffff;
+		channel_type = channel_id >> 24;
+		channel_num = channel_id >> 8 & 0xffff;
+		service_num = channel_id & 0x00ff;
 
 		mydvb_log (MYDVB_LOG_LEVEL_INFO, "dvbviewer: program stream request %d/%d", channel_num, service_num);
 
-		if (mydvb->ready) {  // busy
-			if (channel_num == app_info->channumber && service_num == app_info->number) {
-				r = 0;
-			}
-		} else {
-			app_info->channumber = channel_num;
-			app_info->number	 = service_num;
+		INFO_PROGRAM *ip = info_dvb_find (app_info->info_dvb, channel_type, channel_num, service_num);
 
-			/* safely call end decoder for stopping any previous decoding */
-			mydvb_end_decoder (mydvb);
+		if (ip == NULL) {
+			http_server_send_not_found (response);
 
-			r = mydvb_tune_channel_by_number (mydvb, app_info->info_dvb, app_info->channumber);
+			return 1;
 		}
 
-		if (r == 0) {
+		MYDVB_TUNE *tuner = tuner_program (engine, ip);
+
+		if (tuner) {
 			response->status=200;
 			response->reason="OK";
 
@@ -759,8 +777,9 @@ int dvbviewer_handler (HTTP_RESPONSE *response, APP_INFO *app_info) {
 			STREAM_OUTPUT *so = (STREAM_OUTPUT *) malloc (sizeof(STREAM_OUTPUT));
 			dyn_array_add (app_info->receivers, &so);
 
-			so->http_output.type = OUTPUT_TYPE_HTTP;
-			so->http_output.response = response;
+			so->tuner = tuner;
+			so->type = OUTPUT_TYPE_HTTP;
+			so->u.http_output.response = response;
 
 			return 2;
 
@@ -826,10 +845,11 @@ int dvbviewer_handler (HTTP_RESPONSE *response, APP_INFO *app_info) {
 
 		STREAM_OUTPUT *so = (STREAM_OUTPUT *) malloc (sizeof(STREAM_OUTPUT));
 		so->type = OUTPUT_TYPE_RECORD;
-		so->record_output.response = response;
-		so->record_output.f = f;
+		so->tuner = NULL; // no tuner in record streaming
+		so->u.record_output.response = response;
+		so->u.record_output.f = f;
 
-		so->record_output.listener_id = mydvb_register_ext_listener (mydvb, fileno(f), record_stream_callback, so);
+		so->u.record_output.listener_id = mydvb_register_ext_listener (engine, fileno(f), record_stream_callback, so);
 
 		mydvb_log (MYDVB_LOG_LEVEL_INFO, "dvbviewer: starting transmission of recorded file %s of %lld bytes starting at %ld", fn, fstat.st_size, start_pos);
 
@@ -904,8 +924,9 @@ int dvbviewer_handler (HTTP_RESPONSE *response, APP_INFO *app_info) {
 
 			channel_id = properties_get_int (request->parameters, "channel");
 
-			channel_num = channel_id >> 16;
-			service_num = channel_id & 0xffff;
+			channel_type = channel_id >> 24;
+			channel_num = channel_id >> 8 & 0xffff;
+			service_num = channel_id & 0x00ff;
 
 			// start and end are in UTC
 			double start = properties_get_double (request->parameters, "start");
@@ -922,14 +943,7 @@ int dvbviewer_handler (HTTP_RESPONSE *response, APP_INFO *app_info) {
 				end = (end - 25569) * 86400.0;
 			}
 
-			if (!mydvb->ready || app_info->channumber != channel_num || app_info->number != service_num) {
-				sprintf (body, "<?xml version=\"1.0\" encoding=\"UTF-8\"?><root></root>");
-
-				_dvbviewer_response_xml (response, body);
-
-			}
-
-			char *xml_epg = _dvbviewer_create_epg (mydvb, app_info->info_dvb, service_num, (time_t) start, (time_t) end);
+			char *xml_epg = _dvbviewer_create_epg (engine, app_info->info_dvb, channel_type, channel_num, service_num, (time_t) start, (time_t) end);
 
 			_dvbviewer_response_xml (response, xml_epg);
 
@@ -995,14 +1009,15 @@ int dvbviewer_handler (HTTP_RESPONSE *response, APP_INFO *app_info) {
 			char *title = properties_get (request->parameters, "title");
 			title = url_decode (title);
 
-			channel_num = channel_id >> 16;
-			service_num = channel_id & 0xffff;
+			channel_type = channel_id >> 24;
+			channel_num = channel_id >> 8 & 0xffff;
+			service_num = channel_id & 0x00ff;
 
 			dor 	= (dor - 25569) * 86400;
 			start 	= dor + 60*start; 	// in s
 			end 	= dor + 60*end;	// in s
 
-			_dvbviewer_timeredit (app_info, id, start, end, channel_num, service_num, title, enable);
+			_dvbviewer_timeredit (app_info, id, start, end, channel_type, channel_num, service_num, title, enable);
 
 			if (title) {
 				free (title);

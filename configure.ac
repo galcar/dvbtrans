@@ -33,6 +33,7 @@ AC_CHECK_FUNCS([bzero gethostbyname memset select socket strdup strerror strrchr
 AC_CONFIG_FILES([Makefile
                  doc/Makefile
                  m4/Makefile
-                 src/Makefile])
+                 src/Makefile
+                 tests/Makefile])
 
 AC_OUTPUT

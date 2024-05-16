@@ -1,4 +1,19 @@
-
+/*
+ * This file is part of the dvbtrans distribution (https://github.com/galcar/dvbtrans).
+ * Copyright (c) 2024 G. Alcaraz.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,7 +52,6 @@ extern int optind, opterr, optopt;
 #include "dynarray.h"
 
 #include "utils.h"
-#include "charset.h"
 
 #include "dvbviewer.h"
 
@@ -117,10 +131,32 @@ void daemonize (const char *pid_file) {
  */
 void sig_term (int v) {
 
-	mydvb_end_main_loop (app_info.mydvb);
+	mydvb_end_main_loop (&app_info.engine);
 
 }
 
+MYDVB_TUNE *tuner_program (MYDVB_ENGINE *engine, INFO_PROGRAM *ip) {
+	MYDVB_TUNE *tuner;
+
+	tuner = mydvb_tuner_channel (engine, ip->channel);
+
+	if (tuner == NULL) {
+		return NULL;
+	}
+
+	if (tuner->data != NULL) {
+		INFO_PROGRAM *current = (INFO_PROGRAM *) tuner->data;
+
+		if (current->n != ip->n) {
+			mydvb_tuner_release (engine, tuner);
+			return NULL; // no available
+		}
+	}
+
+	tuner->data = ip;
+
+	return tuner;
+}
 
 int send_broadcast (int sockfd, unsigned char *buf, int buf_len, struct sockaddr_in *target) {
 
@@ -140,20 +176,19 @@ int send_broadcast (int sockfd, unsigned char *buf, int buf_len, struct sockaddr
 
 int net_set_target (NET_OUTPUT *no, const char *net_host, int net_port) {
 
-	char *ip;
+	char ip[128];
 
-	ip = get_ip_by_host (net_host);
-
-	if (ip==NULL) {
+	if (get_ip_by_host (net_host, ip)==NULL) {
 		return -1;
 	}
 
 	bzero((unsigned char *) &no->target, sizeof(no->target));
 	no->target.sin_family=AF_INET;
 	no->target.sin_port=htons(net_port);
-	no->target.sin_addr.s_addr=inet_addr(ip);
-
-	free (ip);
+	//no->target.sin_addr.s_addr=inet_addr(ip);
+	if (inet_aton (ip, &no->target.sin_addr) == 0) {
+		return -1;
+	}
 
 	return 0;
 }
@@ -162,12 +197,12 @@ STREAM_OUTPUT *open_net_output (const char *net_host, int net_port) {
 
 	STREAM_OUTPUT *so = (STREAM_OUTPUT *) malloc (sizeof(STREAM_OUTPUT));
 
-	if (net_set_target (&so->net_output, net_host, net_port) == -1) {
+	if (net_set_target (&so->u.net_output, net_host, net_port) == -1) {
 		free (so);
 		return NULL;
 	}
 
-	if((so->net_output.sockfd=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP))==-1) {
+	if((so->u.net_output.sockfd=socket(AF_INET,SOCK_DGRAM,IPPROTO_UDP))==-1) {
 		free (so);
 		mydvb_log (MYDVB_LOG_LEVEL_ERROR, "Failed to create the network transmission socket");
 
@@ -239,8 +274,8 @@ STREAM_OUTPUT *open_file_output (const char *file_name) {
 
 	fileout = (STREAM_OUTPUT *) malloc (sizeof (STREAM_OUTPUT));
 
-	fileout->file_output.f = fopen (file_name, "w+b");
-	if (!fileout->file_output.f) {
+	fileout->u.file_output.f = fopen (file_name, "w+b");
+	if (!fileout->u.file_output.f) {
 		free (fileout);
 		return NULL;
 	}
@@ -259,32 +294,33 @@ void stream_output_close (STREAM_OUTPUT *so) {
 
 	switch (so->type) {
 		case OUTPUT_TYPE_NET: 
-			if (so->net_output.sockfd!=-1) {
-				close (so->net_output.sockfd);
-				so->net_output.sockfd = -1;
+			if (so->u.net_output.sockfd!=-1) {
+				close (so->u.net_output.sockfd);
+				so->u.net_output.sockfd = -1;
 			}
 			break;
 		case OUTPUT_TYPE_FILE:
-			if (so->file_output.f != NULL) {
-				fclose (so->file_output.f);
-				so->file_output.f = NULL;
+			if (so->u.file_output.f != NULL) {
+				fclose (so->u.file_output.f);
+				so->u.file_output.f = NULL;
 			}
 			break;
 
 		case OUTPUT_TYPE_HTTP:
-			response = so->http_output.response;
+			response = so->u.http_output.response;
 			http_server_request_free (response->request);
 			http_server_response_free (response);
+
 			break;
 
 		case OUTPUT_TYPE_RECORD:
-			response = so->record_output.response;
+			response = so->u.record_output.response;
 			http_server_request_free (response->request);
 			http_server_response_free (response);
 
-			if (so->record_output.f != NULL) {
-				fclose (so->record_output.f);
-				so->record_output.f = NULL;
+			if (so->u.record_output.f != NULL) {
+				fclose (so->u.record_output.f);
+				so->u.record_output.f = NULL;
 			}
 
 			break;
@@ -305,16 +341,16 @@ int stream_output_send (STREAM_OUTPUT *so, unsigned char *buf, int len) {
 	switch (so->type) {
 		case OUTPUT_TYPE_NET:
 
-			n = send_broadcast (so->net_output.sockfd, buf, len, &so->net_output.target);
+			n = send_broadcast (so->u.net_output.sockfd, buf, len, &so->u.net_output.target);
 			break;
 
 		case OUTPUT_TYPE_FILE:
 
-			if (so->file_output.f != NULL) {
+			if (so->u.file_output.f != NULL) {
 
-				n = len * fwrite (buf, len, 1, so->file_output.f);
+				n = len * fwrite (buf, len, 1, so->u.file_output.f);
 
-				if (ferror (so->file_output.f)) {
+				if (ferror (so->u.file_output.f)) {
 					mydvb_log (MYDVB_LOG_LEVEL_ERROR, "Error writing to file %s", strerror (errno));
 					n = -1;
 				}
@@ -325,7 +361,7 @@ int stream_output_send (STREAM_OUTPUT *so, unsigned char *buf, int len) {
 			break;
 
 		case OUTPUT_TYPE_HTTP:
-			receiver = so->http_output.response;
+			receiver = so->u.http_output.response;
 
 			n = http_server_send_chunked (receiver, buf,  len);
 			if (n < 0) {
@@ -334,7 +370,7 @@ int stream_output_send (STREAM_OUTPUT *so, unsigned char *buf, int len) {
 			break;
 
 		case OUTPUT_TYPE_RECORD:
-			receiver = so->record_output.response;
+			receiver = so->u.record_output.response;
 
 			n = http_server_send_chunked (receiver, buf,  len);
 			if (n < 0) {
@@ -357,8 +393,187 @@ void _free_stream_output (void *p) {
 
 }
 
+void cmd_help (TCP_CLIENT *client) {
+	tcp_client_write_ln (client, "Commands: help, tuners, engine, broadcast, stop, channels, broadcast, scan, show, epg, exit, shutdown");
+	tcp_client_write_ln (client, "\thelp: show this");
+	tcp_client_write_ln (client, "\tengine: show core engine current state");
+	tcp_client_write_ln (client, "\tclients: list connected clients");
+	tcp_client_write_ln (client, "\ttuners: list all tuners in the systems and its current state");
+	tcp_client_write_ln (client, "\tchannels: list currrent available channels");
+	tcp_client_write_ln (client, "\tmove <a> <b>: move channel number from a to b");
+	tcp_client_write_ln (client, "\tbroadcast <number> <target> <port>: start broadcast of service number to host target and port");
+	tcp_client_write_ln (client, "\tscan start: start a new channels scan");
+	tcp_client_write_ln (client, "\tscan cancel: cancel current channels scan, don't save any result");
+	tcp_client_write_ln (client, "\tscan stop: stop current channels scan and save the result in the channels file");
+	tcp_client_write_ln (client, "\tscan status: show status of current channels scan");
+	tcp_client_write_ln (client, "\texit: exit and close the current terminal");
+	tcp_client_write_ln (client, "\tshutdown: shutdown dvb transmitter");
+}
 
-void cmd_list (INFO_DVB *dvb, TCP_CLIENT *client) {
+void cmd_clients (APP_INFO *app, TCP_CLIENT *client) {
+
+	if (app->http == NULL) {
+		tcp_client_write_ln (client, "No http server running");
+	} else {
+		for (int i = 0; i < dyn_array_get_size(app->http->clients); i++) {
+			HTTP_CLIENT *c = *((HTTP_CLIENT **) dyn_array_get_data (app->http->clients, i));
+
+			tcp_client_write_ln (client, "Http client %s at port %d"
+				,c->ip
+				,c->dst_port
+			);
+		}
+	}
+
+	if (app->server == NULL) {
+		tcp_client_write_ln (client, "No terminal server running");
+	} else {
+		for (int i = 0; i < app->server->clients_len; i++) {
+			TCP_CLIENT *t = app->server->clients[i];
+
+			tcp_client_write_ln (client, "Terminal client %s at port %d"
+				,t->ip
+				,t->dst_port
+			);
+
+		}
+	}
+
+}
+
+static char *_cmd_tabs[] = {
+		""
+		,"\t"
+		,"\t\t"
+		,"\t\t\t"
+		,"\t\t\t\t"
+		,"\t\t\t\t\t"
+		,"\t\t\t\t\t\t"
+};
+
+void _cmd_descriptors (TCP_CLIENT *client, DYN_ARRAY *descriptors, int num_tabs) {
+
+	char *utf8 = NULL;
+
+	for (int i = 0; i < dyn_array_get_size (descriptors); i++) {
+
+		mydvb_descriptor *d = (mydvb_descriptor *) dyn_array_get_data (descriptors, i);
+
+		tcp_client_write_ln (client, "%sDescriptor type %X (%s), table %X"
+				,_cmd_tabs[num_tabs]
+				,d->info.type
+				,mydvb_descriptor_type_table()[d->info.type]
+				,d->info.table
+				);
+
+		if (d->info.type == 0x0A) {
+
+			for (int j=0; j < d->iso639_lang.num_langs; j++) {
+				tcp_client_write_ln (client, "%sLang %s %d"
+					, _cmd_tabs[num_tabs]
+					,d->iso639_lang.langs[j].lang
+					,d->iso639_lang.langs[j].audio_type
+					);
+			}
+
+		} else if (d->info.type == 0x40) {
+			utf8 = mydvb_text_to_utf8 (d->network_name.name);
+			tcp_client_write_ln (client, "%sNetwork name: %s"
+				, _cmd_tabs[num_tabs]
+				, utf8
+				);
+			if (utf8) {
+				free (utf8);
+			}
+		}
+	}
+}
+
+void cmd_engine (APP_INFO *app, TCP_CLIENT *client) {
+	MYDVB_ENGINE *engine = &app->engine;
+
+	tcp_client_write_ln (client, "Engine state: Running: %d; Listeners: %d; Tuners: %d; Channels: %d; Poll length: %d"
+			,engine->mainloop
+			,dyn_array_get_size (engine->listeners)
+			,dyn_array_get_size (engine->tuners)
+			,dyn_array_get_size (engine->channels)
+			,engine->poll_len
+	);
+
+	for (int i = 0; i < dyn_array_get_size (engine->channels); i++) {
+		MYDVB *mydvb = *((MYDVB **) dyn_array_get_data (engine->channels, i));
+
+		tcp_client_write_ln (client, "\tChannel %d %s - Ready: %d",mydvb->channel,mydvb_tuner_type_table()[mydvb->type],mydvb->ready);
+		if (mydvb->pat) {
+			tcp_client_write_ln (client, "\t\tPAT: ver %d, TS_ID %d, Section %d, SectionNext %d"
+					,mydvb->pat->version
+					,mydvb->pat->ts_id
+					,mydvb->pat->section_n
+					,mydvb->pat->section_n_l
+			);
+
+			if (mydvb->pat->nit) {
+				tcp_client_write_ln (client, "\t\tNIT: %d, PID: %d"
+						,mydvb->pat->nit->network_id
+						,mydvb->pat->nit->pid
+				);
+				_cmd_descriptors (client, mydvb->pat->nit->descriptors, 3);
+			}
+
+			for (int j=0; j < dyn_array_get_size (mydvb->pat->programs); j++) {
+				MYDVB_PROGRAM *p = (MYDVB_PROGRAM *) dyn_array_get_data (mydvb->pat->programs, j);
+
+				tcp_client_write_ln (client, "\t\tPROGRAM %d, PID: %d, ver: %d, PCR PID: %d"
+						,p->number
+						,p->pmt_pid
+						,p->version
+						,p->pcr_pid
+						);
+				_cmd_descriptors (client, p->descriptors, 3);
+
+				for (int k=0; k < dyn_array_get_size (p->streams); k++) {
+
+					MYDVB_STREAM *stream = (MYDVB_STREAM *) dyn_array_get_data (p->streams, k);
+
+					tcp_client_write_ln (client, "\t\t\tStream type %X (%s), PID: %d"
+							,stream->type
+							,mydvb_stream_type_table()[stream->type]
+							,stream->pid
+							);
+					_cmd_descriptors (client, stream->descriptors,4);
+				}
+			}
+		}
+	}
+}
+
+void cmd_tuners (APP_INFO *app, TCP_CLIENT *client) {
+
+	for (int i = 0; i < dyn_array_get_size (app->engine.tuners); i++) {
+		MYDVB_TUNE *tuner = *((MYDVB_TUNE **) dyn_array_get_data(app->engine.tuners,i));
+
+		mydvb_tune_get_info (tuner);
+
+		tcp_client_write_ln (client, "Tuner %d, %s at (%d-%d-%d) of type %d (%s). Fmin: %d, Fmax: %d, Fstep %d. Caps: %lX. Refs: %d; Status %d; frequency: %d; strength: %4.6f; snr: %4.6f; ber: %4.6f"
+						, i
+						, tuner->name
+						, tuner->device, tuner->adapter, tuner->demuxer
+						, tuner->type, mydvb_tuner_type_table()[tuner->type]
+						, tuner->freq_min
+						, tuner->freq_max
+						, tuner->freq_step_min
+						, tuner->caps
+						, tuner->references
+						, tuner->status
+						, tuner->p.frequency
+						, tuner->info.signal
+						, tuner->info.snr
+						, tuner->info.ber
+						);
+	}
+}
+
+void cmd_channels (INFO_DVB *dvb, TCP_CLIENT *client) {
 
 	int i, j, k;
 
@@ -383,14 +598,15 @@ void cmd_list (INFO_DVB *dvb, TCP_CLIENT *client) {
 				if (iprogram!=NULL) {
 					provider = mydvb_text_to_utf8 (iprogram->provider);
 					service  = mydvb_text_to_utf8 (iprogram->service);
-					tcp_client_write_ln (client, "%d/%d;%s;%s;%d;%d:%d",
-							mydvb_tune_get_channel (p->frequency),
+					tcp_client_write_ln (client, "%d;%s %d/%d;%s;%s;%d (%s);%d",
+							iprogram->user_number,
+							mydvb_tuner_type_table()[ichannel->type],
+							mydvb_tune_get_uhf_channel (p->frequency),
 							iprogram->n,
 							(unsigned char *) (provider==NULL ? EMPTY_STRING : provider),
 							(unsigned char *) (service ==NULL ? EMPTY_STRING : service),
-							iprogram->type,
-							iprogram->scrambled,
-							iprogram->user_number
+							iprogram->type, mydvb_service_type_table()[iprogram->type],
+							iprogram->scrambled
 							);
 					if (provider) free (provider);
 					if (service) free (service);
@@ -399,7 +615,6 @@ void cmd_list (INFO_DVB *dvb, TCP_CLIENT *client) {
 		}
 	}
 
-	tcp_client_write_ln (client, "");
 }
 
 void _show_eit_entry (TCP_CLIENT *client, int base_code, MYDVB_EIT *eit) {
@@ -447,7 +662,7 @@ void _show_eit_entry (TCP_CLIENT *client, int base_code, MYDVB_EIT *eit) {
 			stime.tm_min,
 			stime.tm_sec, 	/* date of start */
 			eit_entry->duration,			/* in seconds */
-			mydvb_running_status_table[eit_entry->running_status],
+			mydvb_running_status_table()[eit_entry->running_status],
 			eit_entry->scram
 			,stime.tm_isdst
             ,stime.tm_gmtoff
@@ -500,13 +715,13 @@ void _show_eit_entry (TCP_CLIENT *client, int base_code, MYDVB_EIT *eit) {
 			for (j = 0; j < cd->num_contents; j++) {
 				tcp_client_write_ln (client, "%d;%s",
 						base_code+4,
-						mydvb_desc_content_table[cd->content[j]]);
+						mydvb_desc_content_table()[cd->content[j]]);
 			}
 		}
 	}
 }
 
-void cmd_show_info (MYDVB *mydvb, TCP_CLIENT *client, int channel, int service) {
+void cmd_show_info (MYDVB_ENGINE *engine, TCP_CLIENT *client, mydvb_tuner_type_t type, int channel, int service) {
 	int len;
 	int i, j;
 	mydvb_service_description *sd;
@@ -520,8 +735,8 @@ void cmd_show_info (MYDVB *mydvb, TCP_CLIENT *client, int channel, int service) 
 	char *provider_name = NULL;
 	char *service_name = NULL;
 
-
-	program = mydvb_get_program_by_number (mydvb, service);
+	MYDVB *mydvb = mydvb_get_channel (engine, type, channel);
+	program = mydvb_get_program (engine, type, channel, service);
 
 	if (program == NULL) {
 		tcp_client_write_ln (client, "No info available");
@@ -554,8 +769,8 @@ void cmd_show_info (MYDVB *mydvb, TCP_CLIENT *client, int channel, int service) 
 			sd->number,
 			provider_name, //d->provider_name->text,
 			service_name, //d->service_name->text,
-			mydvb_service_type_table[d->service_type],
-			mydvb_running_status_table[sd->running_status],
+			mydvb_service_type_table()[d->service_type],
+			mydvb_running_status_table()[sd->running_status],
 			sd->scram,
 			sd->eit,
 			sd->eit_pw
@@ -577,7 +792,7 @@ void cmd_show_info (MYDVB *mydvb, TCP_CLIENT *client, int channel, int service) 
 		if (stream->type >= MYDVB_STREAM_TYPE_LEN) {
 			streamType = "Unknown";
 		} else {
-			streamType = mydvb_stream_type_table[stream->type];
+			streamType = mydvb_stream_type_table()[stream->type];
 		}
 
 		tcp_client_write_ln (client, "201;%d;PID %d;%s",
@@ -587,18 +802,22 @@ void cmd_show_info (MYDVB *mydvb, TCP_CLIENT *client, int channel, int service) 
 	}
 
 
-
 	tcp_client_write_ln (client, "");
 }
 
-void cmd_epg (MYDVB *mydvb, TCP_CLIENT *client, int service) {
+void cmd_epg (MYDVB_ENGINE *engine, TCP_CLIENT *client, mydvb_tuner_type_t type, int chn, int service) {
 
 	int i;
 	mydvb_service_description *sd;
-	MYDVB_PROGRAM *program;
 
+	MYDVB *mydvb = mydvb_get_channel (engine, type, chn);
 
-	program = mydvb_get_program_by_number (mydvb, service);
+	if (mydvb == NULL) {
+		tcp_client_write_ln (client, "No info available");
+		return;
+	}
+
+	MYDVB_PROGRAM *program = mydvb_get_program_in_channel (mydvb, service);
 
 	if (program == NULL) {
 		tcp_client_write_ln (client, "No info available");
@@ -617,15 +836,48 @@ void cmd_epg (MYDVB *mydvb, TCP_CLIENT *client, int service) {
 	}
 
 	tcp_client_write_ln (client, "");
+
 }
 
-void scan_all_channels (APP_INFO *app_info) {
+void cmd_move_service (APP_INFO *app_info, int chn_from, int chn_to) {
+
+	info_dvb_move_channel (app_info->info_dvb, chn_from, chn_to);
+
+	info_dvb_save (app_info->scan_file, app_info->info_dvb);
+}
+
+int scan_channel (APP_INFO *app_info, mydvb_tuner_type_t type, int chn) {
 	properties *scan_props = NULL;
-	MYDVB_TUNE_SCAN_PARAMETER scan;
+	MYDVB_TUNER_SCAN_PARAMETER scan;
 
 	scan_props = properties_load (app_info->freq_file);
 
-	scan.search_mode = MYDVB_TUNE_SEARCH_FULL;
+	scan.search_mode = MYDVB_TUNER_SEARCH_PARTIAL;
+	scan.type = type;
+
+	scan.param.t.f_step  = properties_get_long (scan_props, "f_step"); //8000000; // 8MHz bandwidth
+	scan.param.t.f_start = properties_get_long (scan_props, "f_start") + scan.param.t.f_step * (chn - 21); // 474000000; // + 8000000*45; // 474000000;
+	scan.param.t.f_end   = scan.param.t.f_start;
+
+	properties_free (scan_props);
+
+	app_info->scan_info = mydvb_tuner_search (&app_info->engine, &scan);
+	if (app_info->scan_info==NULL) {
+		return -1;
+	}
+
+	return 0;
+
+}
+
+int scan_all_channels (APP_INFO *app_info) {
+	properties *scan_props = NULL;
+	MYDVB_TUNER_SCAN_PARAMETER scan;
+
+	scan_props = properties_load (app_info->freq_file);
+
+	scan.search_mode = MYDVB_TUNER_SEARCH_FULL;
+	scan.type = DVB_TYPE_DVBT;
 
 	scan.param.t.f_start = properties_get_long (scan_props, "f_start"); // 474000000; // + 8000000*45; // 474000000;
 	scan.param.t.f_end   = properties_get_long (scan_props, "f_end"); // 858000000;
@@ -633,22 +885,27 @@ void scan_all_channels (APP_INFO *app_info) {
 
 	properties_free (scan_props);
 
-	app_info->scan_info = mydvb_tune_search (app_info->mydvb, &scan);
+	app_info->scan_info = mydvb_tuner_search (&app_info->engine, &scan);
+	if (app_info->scan_info==NULL) {
+		return -1;
+	}
+
+	return 0;
 
 }
 
-void terminal_end (MYDVB *mydvb, TCP_CLIENT *client) {
+void terminal_end (MYDVB_ENGINE *engine, TCP_CLIENT *client) {
 
 	int listener_id;
 
 	listener_id = *((int *) client->extra);
 
-	mydvb_remove_listener (mydvb, listener_id);
+	mydvb_remove_listener (engine, listener_id);
 
 	tcp_client_disconnect (client);
 }
 
-void telnet_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
+void telnet_callback (MYDVB_ENGINE *engine, MYDVB_EVENT *event, void *data) {
 
 	APP_INFO *app_info = (APP_INFO *) data;
 
@@ -657,13 +914,12 @@ void telnet_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 
 	int fd = event->external.fd;
 
-	unsigned char *cmd = NULL;
-
-	int number;
+	unsigned char cmd[1024];
 
 	int net_port;
 	char net_host[256];
 
+	int chn, service;
 	char aux[256];
 
 	int i;
@@ -681,96 +937,171 @@ void telnet_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 		if (client != NULL) {
 
 			 mydvb_log (MYDVB_LOG_LEVEL_INFO, "Telnet client connected: %s:%d",
-					 get_ip_by_addr (&client->addr), client->addr.sin_port);
+					 get_ip_by_addr (&client->addr, aux), client->addr.sin_port);
 
-			 listener_id = mydvb_register_ext_listener (mydvb, client->socket, telnet_callback, app_info);
+			 listener_id = mydvb_register_ext_listener (engine, client->socket, telnet_callback, app_info);
 
 			 tcp_client_set_extra (client, &listener_id, sizeof (int));
 
-			 tcp_client_write_ln (client, "ok");
+			 client->mode = TCP_CLIENT_MODE_LOGIN;
+
+			 tcp_client_write_ln (client, "DVBTransmitter command shell");
+			 tcp_client_write (client, "User: ");
+
+
 		}
 
 	} else {
 
 		client = tcp_server_get_client_by_socket (server, fd);
 
-		if (client != NULL) {
+		if (client == NULL) {
+			// client not found (why?)
+			return;
+		}
 
-			cmd = tcp_client_read_ln (client);
+		if (tcp_client_read_ln (client, cmd) == NULL) { // closed by client disconnection
 
-			if (cmd == NULL) { // closed by client disconnection
+			terminal_end (engine, client);
+			return;
 
-				terminal_end (mydvb, client);
+		}
 
-			} else if (strcmp (cmd, "") == 0) { /* error reading data */
+		if (strcmp (cmd, "") == 0) { /* error reading data */
+			return;
+		}
 
-			} else if (strncmp (cmd, "push", 4)==0) {
+		if (cmd[0] == 0xff) { /* telnet command, ignore it for now */
+			return;
+		}
 
-				sscanf (cmd, "push %d/%d", &(app_info->channumber), &(app_info->number));
+		if (client->mode == TCP_CLIENT_MODE_LOGIN) {
 
-				mydvb_log (MYDVB_LOG_LEVEL_INFO, "push stream %d/%d", app_info->channumber, app_info->number);
+			char echo_off[4] = {0xFF, 0xFC, 0x01, 0x00};
 
-				/* safely call end decoder for stopping any previous decoding */
-				mydvb_end_decoder (mydvb);
+			strcpy (client->user, cmd);
 
-				r = mydvb_tune_channel_by_number (mydvb, app_info->info_dvb, app_info->channumber);
+			tcp_client_write (client, "%s", echo_off); // echo off
 
-				if (r == 0) {
+			client->mode = TCP_CLIENT_MODE_PASSWORD;
 
-					tcp_client_write_ln (client, "ok");
+		} else if (client->mode == TCP_CLIENT_MODE_PASSWORD) {
+
+			tcp_client_write (client, "%c%c%c", 0xFF,0xFC,0x01); // echo on
+
+			if (strcmp(client->user, "admin")==0 && strcmp (cmd,"pass")==0) {
+				client->mode = TCP_CLIENT_MODE_CMD;
+				tcp_client_write (client, "> ");
+			} else {
+				client->mode = TCP_CLIENT_MODE_LOGIN;
+				tcp_client_write_ln (client, "Invalid username/password");
+				tcp_client_write (client, "User: ");
+			}
+
+
+		} else if (client->mode == TCP_CLIENT_MODE_CMD) {
+
+			if (strncmp (cmd, "help", 4) == 0) {
+
+				cmd_help (client);
+
+			} else if (strncmp (cmd, "engine", 6)==0) {
+
+				cmd_engine (app_info, client);
+
+			}  else if (strncmp (cmd, "tuners", 6)==0) {
+
+				cmd_tuners (app_info, client);
+
+			} else if (strncmp (cmd, "clients", 7)==0) {
+
+				cmd_clients (app_info, client);
+
+			} else if (strncmp (cmd, "channels", 4)==0) {
+
+				cmd_channels (app_info->info_dvb, client);
+
+			} else if (strncmp (cmd, "move", 4)==0) {
+
+				int chn_from;
+				int chn_to;
+
+				sscanf (cmd, "move %d %d", &chn_from, &chn_to);
+				cmd_move_service (app_info, chn_from, chn_to);
+
+			} else if (strncmp (cmd, "stop", 4)==0) {
+
+				if (app_info->broadcast == NULL) {
+
+					tcp_client_write_ln (client, "broadcast is not enabled");
 
 				} else {
 
-					tcp_client_write_ln (client, "error: can't tune the channel");
+					mydvb_tuner_release (engine, app_info->broadcast->tuner);
+					app_info->broadcast->tuner = NULL;
+
 				}
 
-			} else if (strcmp (cmd, "stop")==0) {
+			} else if (strncmp (cmd, "broadcast", 9)==0) {
 
-				mydvb_end_decoder (mydvb);
+				int n;
 
-				tcp_client_write_ln (client, "ok");
+				if (app_info->broadcast == NULL) {
 
-			} else if (strncmp (cmd, "list", 4)==0) {
+					tcp_client_write_ln (client, "broadcast is not enabled");
 
-				cmd_list (app_info->info_dvb, client);
+				} else {
 
-			} else if (strncmp (cmd, "broadcast", 8)==0) {
+					sscanf (cmd, "broadcast %d %s %d", &n, net_host, &net_port);
 
-				sscanf (cmd, "broadcast %s %d", net_host, &net_port);
+					if (strcmp (net_host, "me")==0) {
+						sprintf (net_host, "%s", get_ip_by_addr (&client->addr, aux));
+					}
 
-				if (strcmp (net_host, "me")==0) {
-					sprintf (net_host, "%s", get_ip_by_addr (&client->addr));
-				}
+					mydvb_log (MYDVB_LOG_LEVEL_INFO, "Broadcast to %s %d", net_host, net_port);
 
-				mydvb_log (MYDVB_LOG_LEVEL_INFO, "Broadcast to %s %d", net_host, net_port);
+					r = net_set_target (&app_info->broadcast->u.net_output, net_host, net_port);
 
-				r = -1;
-				for (i=0; i < dyn_array_get_size (app_info->receivers); i++) {
-					STREAM_OUTPUT *so = *((STREAM_OUTPUT **) dyn_array_get_data (app_info->receivers, i));
-					if (so->type == OUTPUT_TYPE_NET) {
-						r = net_set_target (&so->net_output, net_host, net_port);
-						break;
+					if (r != 0) {
+
+						tcp_client_write_ln (client, "error: can't set the broadcast target");
+					}
+
+					INFO_PROGRAM *ip = info_dvb_get_by_user_number (app_info->info_dvb, n);
+
+					if (ip == NULL) {
+
+						tcp_client_write_ln (client, "program not found");
+
+					} else {
+
+						MYDVB_TUNE *tuner = tuner_program (engine, ip);
+
+						if (tuner != NULL) {
+
+							app_info->broadcast->tuner = tuner;
+
+						} else {
+
+							tcp_client_write_ln (client, "no tuners available");
+						}
 					}
 				}
 
-				if (r == 0) {
+			} else if (strncmp (cmd, "scan", 4)==0) {
 
-					tcp_client_write_ln (client, "ok");
-
-				} else {
-
-					tcp_client_write_ln (client, "error: can't set the broadcast target");
-				}
-
-			} else if (strncmp (cmd, "search", 6)==0) {
-
-				sscanf (cmd, "search %s", aux);
+				sscanf (cmd, "scan %s", aux);
 
 				if (strcmp (aux, "start")==0) {
 
-					scan_all_channels (app_info);
+					if (app_info->scan_info != NULL) {
 
-					tcp_client_write_ln (client, "ok");
+						tcp_client_write_ln (client, "Can't start a new scan, scanning already in process");
+
+					} else if (scan_all_channels (app_info)!=0) {
+
+						tcp_client_write_ln (client, "scan start failed");
+					}
 
 				} else if (strcmp (aux, "stop")==0) {
 
@@ -778,11 +1109,9 @@ void telnet_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 
 						app_info->scan_info->status = MYDVB_SEARCH_STOPPED;
 
-						tcp_client_write_ln (client, "ok");
-
 					} else {
 
-						tcp_client_write_ln (client, "No searching");
+						tcp_client_write_ln (client, "No scanning");
 					}
 
 				} else if (strcmp (aux, "cancel")==0) {
@@ -791,11 +1120,9 @@ void telnet_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 
 						app_info->scan_info->status = MYDVB_SEARCH_CANCELLED;
 
-						tcp_client_write_ln (client, "ok");
-
 					} else {
 
-						tcp_client_write_ln (client, "No searching");
+						tcp_client_write_ln (client, "No scanning");
 					}
 
 				} else if (strcmp (aux, "status") == 0) {
@@ -803,14 +1130,14 @@ void telnet_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 					if (app_info->scan_info != NULL) {
 
 						tcp_client_write_ln (client, "%d %d",
-								mydvb_tune_get_channel (app_info->scan_info->scan->scan.t.f),
+								mydvb_tune_get_uhf_channel (app_info->scan_info->scan->scan.t.f),
 								app_info->scan_info->scan->scan.t.f);
 
-						cmd_list (app_info->scan_info->dvb_info, client);
+						cmd_channels (app_info->scan_info->dvb_info, client);
 
 					} else {
 
-						tcp_client_write_ln (client, "No searching");
+						tcp_client_write_ln (client, "No scanning");
 
 					}
 
@@ -822,69 +1149,59 @@ void telnet_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 
 					info_dvb_save (app_info->scan_file, app_info->info_dvb);
 
-					tcp_client_write_ln (client, "ok");
-
 				} else {
 					/* check if this is a specific channel number
 					 *
 					 */
-					int n = 20;
-					MYDVB_TUNE_SCAN_PARAMETER scan;
+					if (app_info->scan_info == NULL) {
 
-					n = atoi (aux);
+						int n = 20;
 
-					scan.search_mode = MYDVB_TUNE_SEARCH_PARTIAL;
+						n = atoi (aux);
+						//n = strtol (aux, (char **)NULL, 10);
 
-					scan.param.t.f_step  = 8000000; // 8MHz bandwidth
-					scan.param.t.f_start = 474000000 + scan.param.t.f_step * (n-21);
-					scan.param.t.f_end   = scan.param.t.f_start;
+						scan_channel (app_info, DVB_TYPE_DVBT, n);
 
+					} else {
+						tcp_client_write_ln (client, "Can't start a new scan, scanning already in process");
+					}
 
-					app_info->scan_info = mydvb_tune_search (mydvb, &scan);
-
-					tcp_client_write_ln (client, "ok");
 				}
-
-
-			} else if (strcmp(cmd,"signal")==0) {
-
-				mydvb_tune_get_info (&mydvb->mytune);
-
-				tcp_client_write_ln (client, "%s; frequency: %d; strength: %d; snr: %d; ber: %d",
-						mydvb->mytune.name,
-						mydvb->mytune.p.frequency,
-						mydvb->mytune.info.signal,
-						mydvb->mytune.info.snr,
-						mydvb->mytune.info.ber);
-
 
 			} else if (strncmp(cmd,"show", 4)==0) {
 
-				cmd_show_info (mydvb, client, app_info->channumber, app_info->number);
+				int chn;
+				int service;
+
+				sscanf (cmd, "show %s %d/%d", aux, &chn, &service);
+
+				mydvb_log (MYDVB_LOG_LEVEL_INFO, "show %s %d %d", aux, chn, service);
+
+				cmd_show_info (engine, client, mydvb_tuner_parse_type (aux), chn, service);
 
 			} else if (strncmp(cmd,"epg", 3)==0) {
 
-				cmd_epg (mydvb, client, app_info->number);
+				sscanf (cmd, "epg %s %d/%d", aux, &chn, &service);
+
+				cmd_epg (engine, client, mydvb_tuner_parse_type (aux), chn, service);
 
 			} else if (strcmp (cmd, "exit")==0) {
 
-				terminal_end (mydvb, client);
+				terminal_end (engine, client);
 
 			} else if (strcmp (cmd, "shutdown")==0) {
 
-				mydvb_end_main_loop (app_info->mydvb);
+				mydvb_end_main_loop (&app_info->engine);
 
 				tcp_client_write_ln (client, "bye");
 
 			} else {
 
 				tcp_client_write_ln (client, "error: unknown command");
+
 			}
 
-			if (cmd != NULL) {
-				free (cmd);
-				cmd = NULL;
-			}
+			tcp_client_write (client, "> ");
 		}
 
 	}
@@ -894,23 +1211,21 @@ void telnet_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 int http_local_handler (HTTP_RESPONSE *response, APP_INFO *app_info) {
 
 	HTTP_REQUEST *request = response->request;
-	MYDVB *mydvb = app_info->mydvb;
-
-	int r;
+	MYDVB_ENGINE *engine = &app_info->engine;
 
 	if (strcmp ("/stream/tv.html", request->uri) == 0) {
 
-		app_info->channumber = properties_get_int (request->parameters, "channel");
-		app_info->number	 = properties_get_int (request->parameters, "program");
+		char *type = properties_get (request->parameters, "type");
+		int chn    = properties_get_int (request->parameters, "channel");
+		int number = properties_get_int (request->parameters, "program");
 
-		mydvb_log (MYDVB_LOG_LEVEL_INFO, "HTTP program %d/%d", app_info->channumber, app_info->number);
+		mydvb_log (MYDVB_LOG_LEVEL_INFO, "HTTP program %s %d/%d", type, chn, number);
 
-		/* safely call end decoder for stopping any previous decoding */
-		mydvb_end_decoder (mydvb);
+		INFO_PROGRAM *p = info_dvb_find (app_info->info_dvb, mydvb_tuner_parse_type(type), chn, number);
 
-		r = mydvb_tune_channel_by_number (mydvb, app_info->info_dvb, app_info->channumber);
+		MYDVB_TUNE *tuner = tuner_program (engine, p);
 
-		if (r == 0) {
+		if (tuner) {
 			response->status=200;
 			response->reason="OK";
 
@@ -920,8 +1235,9 @@ int http_local_handler (HTTP_RESPONSE *response, APP_INFO *app_info) {
 			STREAM_OUTPUT *so = (STREAM_OUTPUT *) malloc (sizeof(STREAM_OUTPUT));
 			dyn_array_add (app_info->receivers, &so);
 
-			so->http_output.type = OUTPUT_TYPE_HTTP;
-			so->http_output.response = response;
+			so->type = OUTPUT_TYPE_HTTP;
+			so->tuner = tuner;
+			so->u.http_output.response = response;
 
 
 			return 2;
@@ -936,16 +1252,14 @@ int http_local_handler (HTTP_RESPONSE *response, APP_INFO *app_info) {
 	return 0;
 }
 
-void record_stream_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
+void record_stream_callback (MYDVB_ENGINE *engine, MYDVB_EVENT *event, void *data) {
 
 	STREAM_OUTPUT *so = (STREAM_OUTPUT *) data;
-
-	int fd = event->external.fd;
 
 	ssize_t n=0;
 	static unsigned char buffer[2*4096];
 
-	n = fread(buffer, 1, sizeof(buffer), so->record_output.f);
+	n = fread(buffer, 1, sizeof(buffer), so->u.record_output.f);
 
 	if (n == 0) {
 
@@ -954,23 +1268,25 @@ void record_stream_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 		// send end of chunked
 		stream_output_send (so, buffer, n);
 
-		int listener_id = so->record_output.listener_id;
-		stream_output_close (so);
+		int listener_id = so->u.record_output.listener_id;
 
-		mydvb_remove_listener (mydvb, listener_id);
+		mydvb_remove_listener (engine, listener_id);
+
+		stream_output_close (so);
 
 	} else if (stream_output_send (so, buffer, n) < 0) {
 
-		int listener_id = so->record_output.listener_id;
-		stream_output_close (so);
+		int listener_id = so->u.record_output.listener_id;
 
-		mydvb_remove_listener (mydvb, listener_id);
+		mydvb_remove_listener (engine, listener_id);
+
+		stream_output_close (so);
 
 	}
 
 }
 
-void http_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
+void http_callback (MYDVB_ENGINE *engine, MYDVB_EVENT *event, void *data) {
 
 	APP_INFO *app_info = (APP_INFO *) data;
 
@@ -995,7 +1311,7 @@ void http_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 		client = http_server_open_client (server);
 
 		if (client != NULL) {
-			listener_id = mydvb_register_ext_listener (mydvb, client->socket, http_callback, app_info);
+			listener_id = mydvb_register_ext_listener (engine, client->socket, http_callback, app_info);
 
 			http_server_set_client_data (client, &listener_id, sizeof (int));
 		}
@@ -1003,12 +1319,39 @@ void http_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 	} else {
 		client = http_server_find_client_by_fd (server, fd);
 
+		if (client == NULL) {
+			return;
+		}
+
 		request = http_server_request_new (client);
 		if (request == NULL) { // client has closed
 
 			listener_id = *((int *) client->data);
 
-			mydvb_remove_listener (mydvb, listener_id);
+			mydvb_remove_listener (engine, listener_id);
+
+			// remove from receiver
+			for (int i = 0; i < dyn_array_get_size (app_info->receivers); i++) {
+
+				STREAM_OUTPUT *output = *((STREAM_OUTPUT **) dyn_array_get_data (app_info->receivers, i));
+
+				if (output->type == OUTPUT_TYPE_HTTP) {
+
+					if (output->u.http_output.response->request->client == client) {
+
+						mydvb_tuner_release (engine, output->tuner);
+
+						stream_output_close (output);
+
+						// remove from receivers
+						dyn_array_remove(app_info->receivers, i);
+
+						break;
+
+					}
+
+				}
+			}
 
 			http_server_close_client (client);
 
@@ -1040,7 +1383,7 @@ void http_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 }
 
 
-void search_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
+void search_callback (MYDVB_ENGINE *engine, MYDVB_EVENT *event, void *data) {
 
 	APP_INFO *app_info = (APP_INFO *) data;
 
@@ -1053,7 +1396,7 @@ void search_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 	if (event->search.status == MYDVB_SEARCH_COMPLETED ||
 		event->search.status == MYDVB_SEARCH_STOPPED) {
 
-		if (app_info->scan_info->scan->search_mode == MYDVB_TUNE_SEARCH_PARTIAL) {
+		if (app_info->scan_info->scan->search_mode == MYDVB_TUNER_SEARCH_PARTIAL) {
 
 			info_dvb_merge (app_info->info_dvb, dvb);
 
@@ -1081,15 +1424,13 @@ void search_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 }
 
 
-void tune_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
+void tuner_callback (MYDVB_ENGINE *engine, MYDVB_EVENT *event, void *data) {
 
-	APP_INFO *app_info = (APP_INFO *) data;
-
-	if (event->tune.status == TUNE_STATUS_LOCK) {
+	if (event->tuner.status == TUNER_STATUS_LOCK) {
 
 		mydvb_log (MYDVB_LOG_LEVEL_DEBUG, "Starting decoder");
 
-		mydvb_start_decoder (mydvb);
+		mydvb_start_decoder (engine, event->tuner.tuner);
 
 	}
 }
@@ -1097,7 +1438,7 @@ void tune_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 /**
  * Invoked by the dvb system when there are data in the vdr device
  */
-void data_reader_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
+void data_reader_callback (MYDVB_ENGINE *engine, MYDVB_EVENT *event, void *data) {
 
 	APP_INFO *app_info = (APP_INFO *) data;
 	int i;
@@ -1106,7 +1447,14 @@ void data_reader_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 	for (i = 0; i < dyn_array_get_size (app_info->receivers); i++) {
 
 		STREAM_OUTPUT *output = *((STREAM_OUTPUT **) dyn_array_get_data (app_info->receivers, i));
+
+		if (event->stream.tuner != output->tuner) {
+			continue;
+		}
+
 		if (stream_output_send (output, event->stream.buffer, event->stream.length) < 0) {
+
+			mydvb_tuner_release (engine, output->tuner);
 
 			stream_output_close (output);
 
@@ -1114,10 +1462,6 @@ void data_reader_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 			dyn_array_remove(app_info->receivers, i);
 			i--;
 
-			if (dyn_array_get_size (app_info->receivers) == 0) {
-
-				mydvb_end_decoder (mydvb);
-			}
 		}
 
 	}
@@ -1129,9 +1473,23 @@ void data_reader_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 /**
  * called 1 time per second
  */
-void timeout_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
+void timeout_callback (MYDVB_ENGINE *engine, MYDVB_EVENT *event, void *data) {
 
 	APP_INFO *app_info = (APP_INFO *) data;
+
+	// auto-scan when channel list is empty
+	if (app_info->info_dvb->channels_len == 0) { // scan required
+
+		if (event->timeout.count > app_info->next_autoscan) {
+
+			mydvb_log (MYDVB_LOG_LEVEL_INFO, "Auto scanning start");
+
+			app_info->next_autoscan = event->timeout.count + 30*60*1000;
+
+			scan_all_channels (app_info);
+
+		}
+	}
 
 	// recorder manager
 	if (dyn_array_get_size (app_info->recorder->progs) > 0) {
@@ -1145,6 +1503,8 @@ void timeout_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 
 			if (p->out != NULL) {
 
+				mydvb_tuner_release (engine, p->out->tuner);
+
 				stream_output_close (p->out);
 
 				// remove from receivers
@@ -1153,76 +1513,69 @@ void timeout_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 
 					if (so == p->out) {
 						dyn_array_remove(app_info->receivers, i);
-
-						if (dyn_array_get_size (app_info->receivers) == 0) {
-
-							mydvb_end_decoder (mydvb);
-						}
-
 						break;
 					}
 				}
 
 				p->out = NULL;
-				p->status = 'C';
-
-				recorder_save (app_info->recorder);
-
-				recorder_sort (app_info->recorder);
-
 			}
+
+			p->status = 'C';
+
+			recorder_save (app_info->recorder);
+
+			recorder_sort (app_info->recorder);
+
 		}
 
 		if (p->status == 'W' && p->start <= event->timeout.count
 				&& p->end > event->timeout.count) {
 
-			int r = -1;
 			char fn[4096];
 
-			// this prog must start
-			if (mydvb->ready) {  // busy
-				if (p->channel == app_info->channumber && p->service == app_info->number) {
-					r = 0;
-				}
-			} else {
-				app_info->channumber = p->channel;
-				app_info->number	 = p->service;
+			INFO_PROGRAM *ip = info_dvb_find (app_info->info_dvb, p->type, p->channel, p->service);
 
-				/* safely call end decoder for stopping any previous decoding */
-				mydvb_end_decoder (mydvb);
-
-				r = mydvb_tune_channel_by_number (mydvb, app_info->info_dvb, app_info->channumber);
+			if (ip == NULL) {
+				mydvb_log (MYDVB_LOG_LEVEL_ERROR, "Program '%s' not found at %s %d/%d", p->title, mydvb_tuner_type_table()[p->type], p->channel, p->service);
+				return;
 			}
 
-			if (r == 0) {
+			mydvb_log (MYDVB_LOG_LEVEL_INFO, "Program '%s' found at %s %d/%d", p->title, mydvb_tuner_type_table()[p->type], p->channel, p->service);
 
-				STREAM_OUTPUT *fileout;
+			MYDVB_TUNE *tuner = tuner_program (engine, ip);
 
-				prog_get_file_path (p, fn);
-
-				fileout = open_file_output (fn);
-
-				if (fileout == NULL) {
-					mydvb_log (MYDVB_LOG_LEVEL_ERROR, "Can't open file for recording %s", fn);
-					return;
-				} else {
-
-					dyn_array_add (app_info->receivers, &fileout);
-
-					p->out 		= fileout;
-					p->status 	= 'R';
-
-					recorder_save (app_info->recorder);
-
-					mydvb_log (MYDVB_LOG_LEVEL_INFO, "Recording started: %s", p->title);
-
-				}
-
-			} else {
-
-				mydvb_log (MYDVB_LOG_LEVEL_INFO, "DVB busy, can't start recording %s at %d/%d", p->title, p->channel, p->service);
-
+			if (!tuner) {
+				mydvb_log (MYDVB_LOG_LEVEL_INFO, "No tuners available, can't start recording '%s' at %s %d/%d", p->title, mydvb_tuner_type_table()[p->type], p->channel, p->service);
+				return;
 			}
+
+			mydvb_log (MYDVB_LOG_LEVEL_INFO, "Tuner available");
+
+			STREAM_OUTPUT *fileout;
+
+			prog_get_file_path (p, fn);
+
+			fileout = open_file_output (fn);
+
+			if (fileout == NULL) {
+				mydvb_log (MYDVB_LOG_LEVEL_ERROR, "Can't open file for recording %s", fn);
+
+				mydvb_tuner_release (engine, tuner);
+
+				return;
+			}
+
+			fileout->tuner  = tuner;
+
+			dyn_array_add (app_info->receivers, &fileout);
+
+			p->out 			= fileout;
+			p->status 		= 'R';
+
+			recorder_save (app_info->recorder);
+
+			mydvb_log (MYDVB_LOG_LEVEL_INFO, "Recording started: %s", p->title);
+
 		}
 	}
 
@@ -1231,7 +1584,7 @@ void timeout_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 /**
  * invoked by the dvb system when the started program is ready
  */
-void program_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
+void program_callback (MYDVB_ENGINE *engine, MYDVB_EVENT *event, void *data) {
 	int len, i;
 	MYDVB_STREAM *stream;
 	MYDVB_PROGRAM *program;
@@ -1242,7 +1595,7 @@ void program_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 	len = dyn_array_get_size (program->streams);
 	for (i=0; i < len; i++) {
 			stream = dyn_array_get_data (program->streams, i);
-			mydvb_start_stream (mydvb, stream);
+			mydvb_start_stream (event->program.tuner, stream);
 	}
 
 }
@@ -1250,14 +1603,17 @@ void program_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
 /**
  * invoked by the dvb system when it is ready
  */
-void ready_callback (MYDVB *mydvb, MYDVB_EVENT *event, void *data) {
+void channel_ready_callback (MYDVB_ENGINE *engine, MYDVB_EVENT *event, void *data) {
 
 	// channel is ready
-	MYDVB_PROGRAM *program = NULL;
-	APP_INFO *app_info = (APP_INFO *) data;
+	INFO_PROGRAM *info_program = (INFO_PROGRAM *) event->ready.tuner->data;
 
-	program = mydvb_get_program_by_number (mydvb, app_info->number);
-	mydvb_start_program (mydvb, program);
+	MYDVB_PROGRAM *program = mydvb_get_program (engine
+			, info_program->channel->type
+			, info_program->channel->n
+			, info_program->n);
+
+	mydvb_start_program (engine, event->ready.tuner, program);
 				
 }
 
@@ -1280,10 +1636,6 @@ int main (int argc, char *argv[]) {
 
 	char *file_name;
 
-	MYDVB_LIST	   *dvb_list;
-
-	MYDVB *mydvb = NULL;
-
 	int n;
 
 	int terminal_port = 8888;
@@ -1291,8 +1643,6 @@ int main (int argc, char *argv[]) {
 	int http_port = 8089;
 
 	properties *conf;
-
-	char *dvb_type = NULL;
 
 	char *logger_level = NULL;
 	char *logger_file  = NULL;
@@ -1358,26 +1708,12 @@ int main (int argc, char *argv[]) {
 		return -1;
 	}
 
-	/* logger facilities */
+	/* logger */
 	logger_level = properties_get (conf, "logger.level");
 
 	if (logger_level != NULL) {
 
-		mydvb_log_level_t level = MYDVB_LOG_LEVEL_ERROR;
-
-		if (strcmp ("debug",logger_level)==0) {
-
-			level = MYDVB_LOG_LEVEL_DEBUG;
-
-		} else if (strcmp ("error", logger_level)==0) {
-
-			level = MYDVB_LOG_LEVEL_ERROR;
-
-		} else if (strcmp ("info", logger_level)==0){
-
-			level = MYDVB_LOG_LEVEL_INFO;
-
-		}
+		mydvb_log_level_t level = mydvb_log_parse_level (logger_level);
 
 		logger_file = properties_get (conf, "logger.file");
 
@@ -1386,9 +1722,6 @@ int main (int argc, char *argv[]) {
 
 	mydvb_log (MYDVB_LOG_LEVEL_INFO, "DVBTransmitter initializing");
 
-	app_info.channumber = 0;
-	app_info.number     = 0;
-
 	app_info.receivers = dyn_array_new (sizeof (STREAM_OUTPUT *));
 	dyn_array_set_free_callback (app_info.receivers, _free_stream_output);
 
@@ -1396,19 +1729,17 @@ int main (int argc, char *argv[]) {
 	n = 0;
 	if (strcmp ("yes", properties_get (conf, "broadcast")) == 0) {
 
-		STREAM_OUTPUT *netout;
-
 		net_port = properties_get_int (conf, "broadcast.port");
 
 		net_host = properties_get (conf, "broadcast.host");
 
-		netout = open_net_output (net_host, net_port);
+		app_info.broadcast = open_net_output (net_host, net_port);
 
-		if (netout == NULL) {
+		if (app_info.broadcast == NULL) {
 			mydvb_log (MYDVB_LOG_LEVEL_ERROR, "Can't open broadcast host. Broadcast disabled");
 
 		} else {
-			dyn_array_add (app_info.receivers, &netout);
+			dyn_array_add (app_info.receivers, &app_info.broadcast);
 
 			mydvb_log (MYDVB_LOG_LEVEL_INFO, "Broadcast mode enabled to %s:%d", net_host, net_port);
 		}
@@ -1424,7 +1755,7 @@ int main (int argc, char *argv[]) {
 		fileout = open_file_output (file_name);
 
 		if (fileout == NULL) {
-			mydvb_log (MYDVB_LOG_LEVEL_ERROR, "Can't dumping file. Dumping disabled");
+			mydvb_log (MYDVB_LOG_LEVEL_ERROR, "Can't open dumping file. Dumping disabled");
 
 		} else {
 			dyn_array_add (app_info.receivers, &fileout);
@@ -1447,17 +1778,17 @@ int main (int argc, char *argv[]) {
 
 
 	/* --------------------------------------------------------- */
-	/* --- startup the telnet server at the specified port ----- */
+	/* --- startup the terminal server at the specified port ----- */
 	/* --------------------------------------------------------- */
 	terminal_port = properties_get_int (conf, "terminal.port");
 	app_info.server = tcp_server_create (terminal_port);
 
 	if (app_info.server == NULL) {
-		mydvb_log (MYDVB_LOG_LEVEL_ERROR, "Failed to initialize the telnet server: %s", strerror(errno));
-		mydvb_log (MYDVB_LOG_LEVEL_INFO, "No telnet server available");
+		mydvb_log (MYDVB_LOG_LEVEL_ERROR, "Failed to initialize the terminal server: %s", strerror(errno));
+		mydvb_log (MYDVB_LOG_LEVEL_INFO, "No terminal server available");
 
 	} else {
-		mydvb_log (MYDVB_LOG_LEVEL_INFO, "Telnet running at port %d", terminal_port);
+		mydvb_log (MYDVB_LOG_LEVEL_INFO, "Terminal Server running at port %d", terminal_port);
 	}
 
 
@@ -1481,67 +1812,36 @@ int main (int argc, char *argv[]) {
 
 	app_info.info_dvb = info_dvb_new ();
 
+	app_info.next_autoscan = 0;
+
 	info_dvb_load (app_info.scan_file, app_info.info_dvb);
 	
-	// build the available list of dvb devices
-	dvb_list = mydvb_list_new ();
+	// initialize mydvb engine
+	mydvb_engine_init (&app_info.engine);
 
-	/* dvb type */
-	dvb_type = properties_get (conf, "dvb.type");
-	if (dvb_type == NULL) {
-		dvb_type = "dvbt";
-	}
+	// add some listeners
+	mydvb_register_listener (&app_info.engine, MYDVB_EVENT_READY, channel_ready_callback, &app_info);
 
-	// find the apropiate dvb device
-	if (strcmp (dvb_type, "dvbt")==0) {
+	mydvb_register_listener (&app_info.engine, MYDVB_TUNER_EVENT, tuner_callback, &app_info);
 
-		mydvb = mydvb_list_get_dvbt (dvb_list);
+	mydvb_register_listener (&app_info.engine, MYDVB_EVENT_STREAM, data_reader_callback, &app_info);
 
-	} else if (strcmp (dvb_type, "dvbs")==0) {
+	mydvb_register_listener (&app_info.engine, MYDVB_EVENT_PROGRAM, program_callback, NULL);
 
-		mydvb = mydvb_list_get_dvbs (dvb_list);
+	mydvb_register_listener (&app_info.engine, MYDVB_SEARCH_EVENT, search_callback, &app_info);
 
-	} else if (strcmp (dvb_type, "dvbc")==0) {
+	mydvb_register_listener (&app_info.engine, MYDVB_TIMEOUT_EVENT, timeout_callback, &app_info);
 
-		mydvb = mydvb_list_get_dvbc (dvb_list);
+	mydvb_register_ext_listener (&app_info.engine, app_info.server->socket, telnet_callback, &app_info);
 
-	}
+	mydvb_register_ext_listener (&app_info.engine, app_info.http->socket, http_callback, &app_info);
 
-	if (mydvb) {
+	/* start up the main loop */
+	mydvb_main_loop (&app_info.engine);
 
-		app_info.mydvb = mydvb;
-
-		mydvb_init (mydvb);
-
-		mydvb_register_listener (mydvb, MYDVB_EVENT_READY, ready_callback, &app_info);
-
-		mydvb_register_listener (mydvb, MYDVB_TUNE_EVENT, tune_callback, &app_info);
-
-		mydvb_register_listener (mydvb, MYDVB_EVENT_STREAM, data_reader_callback, &app_info);
-
-		mydvb_register_listener (mydvb, MYDVB_EVENT_PROGRAM, program_callback, NULL);
-
-		mydvb_register_ext_listener (mydvb, app_info.server->socket, telnet_callback, &app_info);
-
-		mydvb_register_listener (mydvb, MYDVB_SEARCH_EVENT, search_callback, &app_info);
-
-		mydvb_register_listener (mydvb, MYDVB_TIMEOUT_EVENT, timeout_callback, &app_info);
-
-		mydvb_register_ext_listener (mydvb, app_info.http->socket, http_callback, &app_info);
-
-		/* start up the main loop */
-		mydvb_main_loop (mydvb);
-
-		mydvb_tune_end (&mydvb->mytune);
-
-		mydvb_end (mydvb);
-
-
-	}
+	mydvb_engine_end (&app_info.engine);
 	
 	info_dvb_free (app_info.info_dvb);
-
-	mydvb_list_free (dvb_list);
 
 	recorder_free (app_info.recorder);
 
@@ -1552,6 +1852,8 @@ int main (int argc, char *argv[]) {
 	dyn_array_free (app_info.receivers);
 
 	properties_free (conf);
+
+	mydvb_log (MYDVB_LOG_LEVEL_INFO, "DVBTransmitter end");
 
 	mydvb_log_close ();
 

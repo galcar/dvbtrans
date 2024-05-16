@@ -1,3 +1,19 @@
+/*
+ * This file is part of the dvbtrans distribution (https://github.com/galcar/dvbtrans).
+ * Copyright (c) 2024 G. Alcaraz.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -6,6 +22,8 @@
 #include <stdarg.h>
 
 #include <unistd.h>
+
+#include "nettools.h"
 
 #include "tcpterm.h"
 
@@ -93,8 +111,11 @@ TCP_CLIENT *tcp_server_connect (TCP_SERVER *server) {
 		return NULL;
 	}
 
+	client->mode = TCP_CLIENT_MODE_INIT;
 	client->server = server;
 	client->extra = NULL;
+	get_ip_by_addr (&client->addr, client->ip);
+	client->dst_port = htons (client->addr.sin_port);
 
 	server->clients[server->clients_len] = client;
 	server->clients_len ++;
@@ -170,7 +191,7 @@ int tcp_client_read (TCP_CLIENT *client, unsigned char *buffer, int len) {
 
 }
 
-int tcp_client_write (TCP_CLIENT *client, unsigned char *buffer, int len) {
+int _tcp_client_write (TCP_CLIENT *client, unsigned char *buffer, int len) {
 
 	int n;
 
@@ -179,13 +200,13 @@ int tcp_client_write (TCP_CLIENT *client, unsigned char *buffer, int len) {
 	return n;
 }
 
-unsigned char *tcp_client_read_ln (TCP_CLIENT *client) {
+unsigned char *tcp_client_read_ln (TCP_CLIENT *client, unsigned char *cmd) {
 
 	int n, i;
 
 	unsigned char buffer[1024];
 	unsigned char c;
-	unsigned char *cmd, *p_cmd;
+	unsigned char *p_cmd;
 
 	n = tcp_client_read (client, buffer, 1024);
 
@@ -197,12 +218,8 @@ unsigned char *tcp_client_read_ln (TCP_CLIENT *client) {
 
 	if (n < 0) {
 
-		cmd = (unsigned char *) malloc (1);
-
-	} else {
-
-		cmd = (unsigned char *) malloc (n + 1);
-
+		cmd[0] = '\0';
+		return cmd;
 	}
 
 	p_cmd = cmd;
@@ -216,8 +233,7 @@ unsigned char *tcp_client_read_ln (TCP_CLIENT *client) {
 		} else if (c == '\r') {
 
 		} else {
-			*p_cmd = c;
-			p_cmd++;
+			*p_cmd++ = c;
 		}
 	}
 
@@ -225,6 +241,21 @@ unsigned char *tcp_client_read_ln (TCP_CLIENT *client) {
 
 	return cmd;
 
+}
+
+void tcp_client_write (TCP_CLIENT *client, const char *format, ...) {
+	va_list ap;
+
+	unsigned char s[1024];
+	int len = 0;
+
+	va_start(ap, format);
+	vsprintf (s, format, ap);
+	va_end (ap);
+
+	len = strlen (s);
+
+	_tcp_client_write (client, s, len);
 }
 
 
@@ -242,7 +273,7 @@ void tcp_client_write_ln (TCP_CLIENT *client, const char *format, ...) {
 
 	len = strlen (s);
 
-	tcp_client_write (client, s, len);
+	_tcp_client_write (client, s, len);
 }
 
 void tcp_client_set_extra (TCP_CLIENT *client, void *data, size_t data_size) {

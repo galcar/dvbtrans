@@ -1,0 +1,27 @@
+[Unit]
+Description=DVBTrans - a DVB Transmitter
+# Add existing services you want started before dvbtrans, e.g, mount
+# units..
+# After=auditd.service syslog.target network.target local-fs.target mnt-recordin
+gs.mount
+# See "man systemd.mount" or view https://www.freedesktop.org/software/systemd/man/systemd.mount.html
+
+After=auditd.service syslog.target network.target local-fs.target
+
+[Service]
+EnvironmentFile=/etc/default/dvbtrans
+ExecStart=/usr/local/bin/dvbtrans -c /etc/dvb/dvbtrans.conf $OPTIONS
+PIDFile=/var/run/dvbtrans.pid
+Type=forking
+Restart=on-failure
+RestartSec=54s
+
+# To enable watchdog functionality, uncomment these, remove Type=forking
+# and compile with --enable-libsystemd_daemon
+#Type=notify
+#WatchdogSec=1m
+#TimeoutStartSec=5m
+#TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

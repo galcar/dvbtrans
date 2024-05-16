@@ -52,3 +52,6 @@ m4/lt~obsolete.m4
 Makefile
 /build/
 /.project
+/.settings/
+/.cproject
+/.autotools
