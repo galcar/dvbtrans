@@ -1,4 +1,0 @@
-# id; start date; end date; status; channel/service; title; filename
-53;21/04/2024 08:17;21/04/2024 08:51;C;dvbt://44/2;Desmontando la historia;Desmontando_la_historia_44_2_20240421081700_53.ts
-54;21/04/2024 08:17;21/04/2024 08:52;C;dvbt://44/2;Desmontando la historia;Desmontando_la_historia_44_2_20240421081700_54.ts
-52;21/04/2024 08:25;21/04/2024 08:38;C;dvbt://37/3;Andalucía Patrimonio Inmaterial;Andalucía_Patrimonio_Inmaterial_37_3_225051987292_4563013.ts
