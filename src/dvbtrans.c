@@ -57,6 +57,11 @@ extern int optind, opterr, optopt;
 
 #include "dvbtrans.h"
 
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 static APP_INFO app_info;
 long total_bytes = 0;
 
@@ -945,7 +950,7 @@ void telnet_callback (MYDVB_ENGINE *engine, MYDVB_EVENT *event, void *data) {
 
 			 client->mode = TCP_CLIENT_MODE_LOGIN;
 
-			 tcp_client_write_ln (client, "DVBTransmitter command shell");
+			 tcp_client_write_ln (client, "DVBTransmitter command shell %s", PACKAGE_VERSION);
 			 tcp_client_write (client, "User: ");
 
 
