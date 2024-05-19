@@ -10,9 +10,9 @@ dvbtrans_SOURCES = dvbtrans.h dvbtrans.c \
 	dvbviewer.h dvbviewer.c \
 	recorder.h recorder.c
 
-		
+
 # dvbtrans_CFLAGS = -D_FILE_OFFSET_BITS=64
 
 dvbtrans_CPPFLAGS = -I$(top_srcdir)/../libmydvb/include
 dvbtrans_CFLAGS = -D_FILE_OFFSET_BITS=64 -L$(top_srcdir)/../libmydvb/build/src/.libs
- 
+
